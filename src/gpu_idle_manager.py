@@ -1,5 +1,10 @@
 #!/usr/bin/env python3
-"""GPU idle manager that runs a dummy CUDA workload when the GPU is idle."""
+"""GPU idle manager that runs a dummy CUDA workload when the GPU is idle.
+
+The manager polls `nvidia-smi` on a configurable interval, starting the dummy
+workload whenever the GPU is idle and stopping it as soon as other compute
+processes are detected.
+"""
 
 import argparse
 import logging
@@ -71,6 +76,7 @@ def start_dummy_process(exe: Path) -> subprocess.Popen:
 
 
 def manage_gpu_idle(dummy_exe: Path, poll_interval: float) -> None:
+    """Continuously poll GPU activity and manage the dummy workload accordingly."""
     dummy_proc: Optional[subprocess.Popen] = None
     stopping = False
 

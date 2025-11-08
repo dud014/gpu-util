@@ -1,7 +1,7 @@
 gpu-util
 ========
 
-This project provides a GPU idle manager that keeps NVIDIA GPUs busy with a dummy CUDA workload when they would otherwise be idle. The manager monitors GPU usage via `nvidia-smi` and stops the dummy workload as soon as another process starts using the GPU.
+This project provides a GPU idle manager that keeps NVIDIA GPUs busy with a dummy CUDA workload when they would otherwise be idle. The manager runs continuously, polling `nvidia-smi` at a configurable interval, and stops the dummy workload as soon as another process starts using the GPU. When the external workload finishes, the manager automatically relaunches the dummy workload so the GPU utilisation stays elevated during the next idle window.
 
 ## Components
 
