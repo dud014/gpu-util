@@ -17,6 +17,8 @@ This project provides a GPU idle manager that keeps NVIDIA GPUs busy with a dumm
    python3 src/gpu_idle_manager.py --poll-interval 2.0
    ```
 
-   The script compiles the CUDA dummy workload into `build/dummy_spin` on first run. It then starts the workload whenever the GPU is idle and terminates it when external GPU usage is detected.
+   The script compiles the CUDA dummy workload into `build/dummy_spin` on first run. It then starts the workload whenever each GPU is idle and terminates the corresponding dummy worker as soon as external usage is detected on that GPU.
+
+In multi-GPU environments the manager treats every GPU independently: one dummy worker per GPU is launched when that device is idle, while GPUs that are already busy are left untouched until they become idle again.
 
 You can adjust the polling interval, build directory, and CUDA source path using the command-line options. Use `--log-level DEBUG` for more detailed logging.

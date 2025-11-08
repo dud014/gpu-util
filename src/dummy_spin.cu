@@ -1,6 +1,7 @@
 #include <cuda_runtime.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 #include <chrono>
 #include <thread>
 
@@ -23,6 +24,25 @@ void check(cudaError_t result, const char *msg) {
 }
 
 int main(int argc, char **argv) {
+    int device_id = 0;
+    for (int i = 1; i < argc; ++i) {
+        if ((strcmp(argv[i], "--device") == 0 || strcmp(argv[i], "-d") == 0) && (i + 1) < argc) {
+            device_id = atoi(argv[++i]);
+        } else {
+            fprintf(stderr, "Usage: %s [--device <id>]\n", argv[0]);
+            return EXIT_FAILURE;
+        }
+    }
+
+    int device_count = 0;
+    check(cudaGetDeviceCount(&device_count), "cudaGetDeviceCount");
+    if (device_id < 0 || device_id >= device_count) {
+        fprintf(stderr, "Requested device %d is out of range (0-%d)\n", device_id, device_count - 1);
+        return EXIT_FAILURE;
+    }
+
+    check(cudaSetDevice(device_id), "cudaSetDevice");
+
     const int elements = 1 << 24; // ~16 million elements
     const int iterations = 1 << 10;
     const size_t bytes = sizeof(float) * elements;

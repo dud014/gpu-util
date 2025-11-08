@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
-"""GPU idle manager that runs a dummy CUDA workload when the GPU is idle.
+"""GPU idle manager that runs a dummy CUDA workload when each GPU is idle.
 
-The manager polls `nvidia-smi` on a configurable interval, starting the dummy
-workload whenever the GPU is idle and stopping it as soon as other compute
-processes are detected.
+The manager polls `nvidia-smi` on a configurable interval, starting a per-GPU
+dummy workload whenever that GPU is idle and stopping it as soon as other
+compute processes are detected on the device.
 """
 
 import argparse
@@ -14,9 +14,19 @@ import subprocess
 import sys
 import time
 from pathlib import Path
-from typing import List, Optional
+from dataclasses import dataclass
+from typing import Dict, List, Optional
 
 LOG = logging.getLogger("gpu-idle-manager")
+
+
+@dataclass
+class GPUState:
+    """Track metadata and dummy workload for a single GPU."""
+
+    index: int
+    uuid: str
+    dummy_proc: Optional[subprocess.Popen] = None
 
 
 def run_command(cmd: List[str]) -> Optional[subprocess.CompletedProcess]:
@@ -27,28 +37,66 @@ def run_command(cmd: List[str]) -> Optional[subprocess.CompletedProcess]:
         return None
 
 
-def get_gpu_compute_pids() -> List[int]:
-    """Return list of PIDs currently using the GPU for compute."""
+def get_gpu_inventory() -> List[GPUState]:
+    """Return the list of GPUs available on the system."""
     result = run_command([
         "nvidia-smi",
-        "--query-compute-apps=pid",
-        "--format=csv,noheader"
+        "--query-gpu=index,uuid",
+        "--format=csv,noheader",
     ])
     if result is None:
         return []
     if result.returncode != 0:
         LOG.error("nvidia-smi failed: %s", result.stderr.strip())
         return []
-    pids = []
+    gpus: List[GPUState] = []
     for line in result.stdout.splitlines():
         line = line.strip()
         if not line:
             continue
         try:
-            pids.append(int(line))
+            index_str, uuid = [part.strip() for part in line.split(",", maxsplit=1)]
+        except ValueError:
+            LOG.debug("Unable to parse GPU info from line: %s", line)
+            continue
+        try:
+            index = int(index_str)
+        except ValueError:
+            LOG.debug("Unable to parse GPU index from line: %s", line)
+            continue
+        gpus.append(GPUState(index=index, uuid=uuid))
+    return gpus
+
+
+def get_gpu_compute_processes() -> Dict[str, List[int]]:
+    """Return mapping of GPU UUID to compute process PIDs."""
+    result = run_command([
+        "nvidia-smi",
+        "--query-compute-apps=gpu_uuid,pid",
+        "--format=csv,noheader",
+    ])
+    if result is None:
+        return {}
+    if result.returncode != 0:
+        LOG.error("nvidia-smi failed: %s", result.stderr.strip())
+        return {}
+    gpu_processes: Dict[str, List[int]] = {}
+    for line in result.stdout.splitlines():
+        line = line.strip()
+        if not line or "No running processes" in line:
+            continue
+        parts = [part.strip() for part in line.split(",")]
+        if len(parts) != 2:
+            LOG.debug("Unable to parse process info from line: %s", line)
+            continue
+        uuid, pid_str = parts
+        try:
+            pid = int(pid_str)
         except ValueError:
             LOG.debug("Unable to parse pid from line: %s", line)
-    return pids
+            continue
+        gpu_processes.setdefault(uuid, []).append(pid)
+    return gpu_processes
 
 
 def build_dummy_executable(src: Path, build_dir: Path) -> Optional[Path]:
@@ -70,14 +118,30 @@ def build_dummy_executable(src: Path, build_dir: Path) -> Optional[Path]:
     return exe_path
 
 
-def start_dummy_process(exe: Path) -> subprocess.Popen:
-    LOG.info("Starting dummy GPU workload: %s", exe)
-    return subprocess.Popen([str(exe)])
+def start_dummy_process(exe: Path, gpu_index: int) -> subprocess.Popen:
+    LOG.info("Starting dummy GPU workload on GPU %s: %s", gpu_index, exe)
+    env = os.environ.copy()
+    env["CUDA_VISIBLE_DEVICES"] = str(gpu_index)
+    return subprocess.Popen([str(exe), "--device", "0"], env=env)
+
+
+def stop_dummy_process(proc: subprocess.Popen, gpu_index: int) -> None:
+    LOG.info("Stopping dummy workload on GPU %s", gpu_index)
+    proc.terminate()
+    try:
+        proc.wait(timeout=10)
+    except subprocess.TimeoutExpired:
+        LOG.warning("Dummy workload on GPU %s did not exit gracefully, killing.", gpu_index)
+        proc.kill()
 
 
 def manage_gpu_idle(dummy_exe: Path, poll_interval: float) -> None:
     """Continuously poll GPU activity and manage the dummy workload accordingly."""
-    dummy_proc: Optional[subprocess.Popen] = None
+    gpu_states = get_gpu_inventory()
+    if not gpu_states:
+        LOG.error("No GPUs detected. Exiting.")
+        return
+
     stopping = False
 
     def handle_signal(signum, frame):
@@ -89,36 +153,37 @@ def manage_gpu_idle(dummy_exe: Path, poll_interval: float) -> None:
     signal.signal(signal.SIGTERM, handle_signal)
 
     while not stopping:
-        active_pids = get_gpu_compute_pids()
-        dummy_pid = dummy_proc.pid if dummy_proc else None
-        external_pids = [pid for pid in active_pids if pid != dummy_pid]
+        active_processes = get_gpu_compute_processes()
 
-        if external_pids:
-            if dummy_proc and dummy_proc.poll() is None:
-                LOG.info(
-                    "External GPU usage detected (PIDs: %s). Stopping dummy workload.",
-                    ", ".join(map(str, external_pids)) or "unknown",
-                )
-                dummy_proc.terminate()
-                try:
-                    dummy_proc.wait(timeout=10)
-                except subprocess.TimeoutExpired:
-                    LOG.warning("Dummy workload did not exit gracefully, killing.")
-                    dummy_proc.kill()
-                dummy_proc = None
-        else:
-            if not dummy_proc or dummy_proc.poll() is not None:
-                dummy_proc = start_dummy_process(dummy_exe)
+        for gpu in gpu_states:
+            proc = gpu.dummy_proc
+            if proc and proc.poll() is not None:
+                gpu.dummy_proc = None
+                proc = None
+
+            gpu_pids = active_processes.get(gpu.uuid, [])
+            dummy_pid = proc.pid if proc else None
+            external_pids = [pid for pid in gpu_pids if pid != dummy_pid]
+
+            if external_pids:
+                if proc and proc.poll() is None:
+                    LOG.info(
+                        "External GPU usage detected on GPU %s (PIDs: %s).",
+                        gpu.index,
+                        ", ".join(map(str, external_pids)),
+                    )
+                    stop_dummy_process(proc, gpu.index)
+                    gpu.dummy_proc = None
+            else:
+                if proc is None:
+                    gpu.dummy_proc = start_dummy_process(dummy_exe, gpu.index)
 
         time.sleep(poll_interval)
 
-    if dummy_proc and dummy_proc.poll() is None:
-        LOG.info("Shutting down dummy workload")
-        dummy_proc.terminate()
-        try:
-            dummy_proc.wait(timeout=10)
-        except subprocess.TimeoutExpired:
-            dummy_proc.kill()
+    for gpu in gpu_states:
+        proc = gpu.dummy_proc
+        if proc and proc.poll() is None:
+            stop_dummy_process(proc, gpu.index)
 
 
 def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
