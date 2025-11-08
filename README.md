@@ -19,6 +19,6 @@ This project provides a GPU idle manager that keeps NVIDIA GPUs busy with a dumm
 
    The script compiles the CUDA dummy workload into `build/dummy_spin` on first run. It then starts the workload whenever each GPU is idle and terminates the corresponding dummy worker as soon as external usage is detected on that GPU.
 
-In multi-GPU environments the manager treats every GPU independently: one dummy worker per GPU is launched when that device is idle, while GPUs that are already busy are left untouched until they become idle again.
+In multi-GPU environments the manager treats every GPU independently: one dummy worker per GPU is launched when that device is idle, while GPUs that are already busy are left untouched until they become idle again. The manager also keeps a running count of how many times each GPU observed external work; these counts are emitted in the logs whenever activity starts, when the GPU returns to idle, and during shutdown.
 
 You can adjust the polling interval, build directory, and CUDA source path using the command-line options. Use `--log-level DEBUG` for more detailed logging.

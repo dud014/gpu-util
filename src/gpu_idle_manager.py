@@ -22,11 +22,13 @@ LOG = logging.getLogger("gpu-idle-manager")
 
 @dataclass
 class GPUState:
-    """Track metadata and dummy workload for a single GPU."""
+    """Track metadata, dummy workload, and usage metrics for a single GPU."""
 
     index: int
     uuid: str
     dummy_proc: Optional[subprocess.Popen] = None
+    external_usage_count: int = 0
+    has_external_activity: bool = False
 
 
 def run_command(cmd: List[str]) -> Optional[subprocess.CompletedProcess]:
@@ -166,15 +168,26 @@ def manage_gpu_idle(dummy_exe: Path, poll_interval: float) -> None:
             external_pids = [pid for pid in gpu_pids if pid != dummy_pid]
 
             if external_pids:
-                if proc and proc.poll() is None:
+                if not gpu.has_external_activity:
+                    gpu.external_usage_count += 1
+                    gpu.has_external_activity = True
                     LOG.info(
-                        "External GPU usage detected on GPU %s (PIDs: %s).",
+                        "External GPU usage detected on GPU %s (events=%s, PIDs: %s).",
                         gpu.index,
+                        gpu.external_usage_count,
                         ", ".join(map(str, external_pids)),
                     )
+                if proc and proc.poll() is None:
                     stop_dummy_process(proc, gpu.index)
                     gpu.dummy_proc = None
             else:
+                if gpu.has_external_activity:
+                    gpu.has_external_activity = False
+                    LOG.info(
+                        "GPU %s returned to idle (external usage events=%s).",
+                        gpu.index,
+                        gpu.external_usage_count,
+                    )
                 if proc is None:
                     gpu.dummy_proc = start_dummy_process(dummy_exe, gpu.index)
 
@@ -184,6 +197,11 @@ def manage_gpu_idle(dummy_exe: Path, poll_interval: float) -> None:
         proc = gpu.dummy_proc
         if proc and proc.poll() is None:
             stop_dummy_process(proc, gpu.index)
+        LOG.info(
+            "GPU %s summary: detected %s external usage event(s).",
+            gpu.index,
+            gpu.external_usage_count,
+        )
 
 
 def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
